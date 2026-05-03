@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Finanzas Personales</title>
 <link rel="manifest" href="manifest.json">
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {
     --bg: #0f172a;
@@ -286,17 +287,66 @@
 <div class="view" id="view-ajustes">
   <div class="page-header">Ajustes</div>
 
-  <div class="section-title">☁️ Sincronización de datos</div>
+  <div class="section-title">☁️ Google Drive — Sync automático</div>
+
+  <!-- Estado: sin configurar -->
+  <div class="card" id="drive-setup-card">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+      <span style="font-size:32px">🔗</span>
+      <div>
+        <div style="font-weight:700;margin-bottom:2px">Conectar Google Drive</div>
+        <div style="font-size:12px;color:var(--muted)">Sync automático entre PC y celular</div>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Client ID de Google <span style="color:var(--primary);cursor:pointer" onclick="showDriveHelp()">¿Cómo obtenerlo?</span></label>
+      <input type="text" id="drive-client-id" placeholder="xxxxx.apps.googleusercontent.com" style="font-size:13px">
+    </div>
+    <button class="btn btn-primary" onclick="saveDriveClientId()">Conectar con Google Drive</button>
+  </div>
+
+  <!-- Estado: conectado -->
+  <div class="card" id="drive-connected-card" style="display:none">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">
+      <span style="font-size:32px">✅</span>
+      <div style="flex:1">
+        <div style="font-weight:700;margin-bottom:2px">Google Drive conectado</div>
+        <div style="font-size:12px;color:var(--muted)" id="drive-account-label">—</div>
+      </div>
+      <button class="btn btn-sm btn-outline" onclick="disconnectDrive()">Desconectar</button>
+    </div>
+    <div id="drive-sync-status" style="font-size:13px;color:var(--muted);text-align:center;padding:8px;background:var(--surface2);border-radius:8px">
+      Sin sincronizar aún
+    </div>
+    <button class="btn btn-outline" style="margin-top:10px" onclick="syncNow()">🔄 Sincronizar ahora</button>
+  </div>
+
+  <!-- Ayuda -->
+  <div class="card" id="drive-help-card" style="display:none">
+    <div style="font-weight:700;margin-bottom:12px">📋 Cómo obtener el Client ID</div>
+    <ol style="font-size:13px;color:var(--muted);line-height:2.2;padding-left:18px">
+      <li>Andá a <strong style="color:var(--primary)">console.cloud.google.com</strong></li>
+      <li>Creá un proyecto nuevo (o usá uno existente)</li>
+      <li>Buscá <strong style="color:var(--text)">APIs y servicios → Credenciales</strong></li>
+      <li>Clic en <strong style="color:var(--text)">Crear credenciales → ID de cliente OAuth</strong></li>
+      <li>Tipo: <strong style="color:var(--text)">Aplicación web</strong></li>
+      <li>En "Orígenes autorizados" agregá:<br>
+        <span style="color:var(--primary);word-break:break-all" id="help-origin">https://larryramirez777-sys.github.io</span>
+      </li>
+      <li>Copiá el <strong style="color:var(--text)">ID de cliente</strong> y pegalo arriba</li>
+      <li>También habilitá la <strong style="color:var(--text)">Google Drive API</strong> en "Biblioteca"</li>
+    </ol>
+    <button class="btn btn-outline" style="margin-top:10px" onclick="document.getElementById('drive-help-card').style.display='none'">Cerrar ayuda</button>
+  </div>
+
+  <div class="section-title" style="margin-top:20px">💾 Backup manual</div>
   <div class="card">
-    <p style="font-size:14px;color:var(--muted);margin-bottom:16px;line-height:1.6">
-      Exportá tus datos como archivo JSON y guardalo en <strong style="color:var(--text)">Google Drive</strong> o <strong style="color:var(--text)">OneDrive</strong>. En el otro dispositivo importás ese mismo archivo para sincronizar.
-    </p>
-    <button class="btn btn-primary" onclick="exportData()">⬆️ Exportar datos (JSON)</button>
+    <button class="btn btn-outline" onclick="exportData()">⬆️ Exportar JSON (backup local)</button>
     <label class="btn btn-outline" style="margin-top:8px;display:flex;align-items:center;justify-content:center;cursor:pointer">
-      ⬇️ Importar datos (JSON)
+      ⬇️ Importar JSON
       <input type="file" accept=".json" onchange="importData(event)" style="display:none">
     </label>
-    <div id="last-export-info" style="margin-top:12px;font-size:12px;color:var(--muted);text-align:center"></div>
+    <div id="last-export-info" style="margin-top:10px;font-size:12px;color:var(--muted);text-align:center"></div>
   </div>
 
   <div class="section-title" style="margin-top:24px">📊 Estadísticas</div>
@@ -484,6 +534,7 @@ const MONEDAS = {
 // ============================================================
 function save() {
   localStorage.setItem('finanzas_data', JSON.stringify(state));
+  scheduleSyncToDrive();
 }
 function load() {
   const raw = localStorage.getItem('finanzas_data');
@@ -1070,6 +1121,156 @@ if ('serviceWorker' in navigator) {
 }
 
 // ============================================================
+// GOOGLE DRIVE SYNC
+// ============================================================
+const DRIVE_FILE_NAME = 'finanzas-data.json';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+let driveToken = null;
+let driveFileId = localStorage.getItem('drive_file_id') || null;
+let driveClientId = localStorage.getItem('drive_client_id') || '';
+let driveUserEmail = localStorage.getItem('drive_user_email') || '';
+let tokenClient = null;
+let syncDebounceTimer = null;
+
+function initDrive() {
+  if (!driveClientId) return;
+  if (typeof google === 'undefined') { setTimeout(initDrive, 500); return; }
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: driveClientId,
+    scope: DRIVE_SCOPE,
+    callback: async (resp) => {
+      if (resp.error) { showToast('❌ Error al conectar con Google'); return; }
+      driveToken = resp.access_token;
+      // get user info
+      try {
+        const r = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+          headers: { Authorization: 'Bearer ' + driveToken }
+        });
+        const u = await r.json();
+        driveUserEmail = u.email || '';
+        localStorage.setItem('drive_user_email', driveUserEmail);
+      } catch {}
+      renderAjustes();
+      await syncFromDrive();
+    }
+  });
+  // silent restore if was connected before
+  if (driveUserEmail) {
+    tokenClient.requestAccessToken({ prompt: 'none' });
+  }
+}
+
+function saveDriveClientId() {
+  const val = document.getElementById('drive-client-id').value.trim();
+  if (!val || !val.includes('.apps.googleusercontent.com')) {
+    showToast('⚠️ Pegá un Client ID válido'); return;
+  }
+  driveClientId = val;
+  localStorage.setItem('drive_client_id', val);
+  initDrive();
+  if (tokenClient) tokenClient.requestAccessToken({ prompt: 'consent' });
+}
+
+function disconnectDrive() {
+  if (!confirm('¿Desconectar Google Drive?\nLos datos locales se conservan.')) return;
+  driveToken = null; driveFileId = null; driveClientId = ''; driveUserEmail = '';
+  localStorage.removeItem('drive_client_id');
+  localStorage.removeItem('drive_file_id');
+  localStorage.removeItem('drive_user_email');
+  renderAjustes();
+  showToast('Desconectado de Google Drive');
+}
+
+function showDriveHelp() {
+  const card = document.getElementById('drive-help-card');
+  card.style.display = card.style.display === 'none' ? 'block' : 'none';
+  const el = document.getElementById('help-origin');
+  if (el) el.textContent = window.location.origin;
+}
+
+async function findOrCreateDriveFile() {
+  // search for existing file
+  const search = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=name='${DRIVE_FILE_NAME}'+and+trashed=false&fields=files(id,name,modifiedTime)`,
+    { headers: { Authorization: 'Bearer ' + driveToken } }
+  );
+  const result = await search.json();
+  if (result.files && result.files.length > 0) {
+    driveFileId = result.files[0].id;
+    localStorage.setItem('drive_file_id', driveFileId);
+    return driveFileId;
+  }
+  // create new file
+  const meta = new Blob([JSON.stringify({ name: DRIVE_FILE_NAME, mimeType: 'application/json' })], { type: 'application/json' });
+  const content = new Blob([JSON.stringify(state)], { type: 'application/json' });
+  const form = new FormData();
+  form.append('metadata', meta);
+  form.append('file', content);
+  const create = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + driveToken }, body: form
+  });
+  const created = await create.json();
+  driveFileId = created.id;
+  localStorage.setItem('drive_file_id', driveFileId);
+  return driveFileId;
+}
+
+async function syncToDrive() {
+  if (!driveToken) return;
+  try {
+    setDriveSyncStatus('⏳ Guardando en Drive...');
+    const fileId = await findOrCreateDriveFile();
+    const content = new Blob([JSON.stringify(state)], { type: 'application/json' });
+    await fetch(`https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`, {
+      method: 'PATCH', headers: { Authorization: 'Bearer ' + driveToken, 'Content-Type': 'application/json' }, body: content
+    });
+    const now = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+    setDriveSyncStatus(`✅ Sincronizado a las ${now}`);
+  } catch (e) {
+    setDriveSyncStatus('❌ Error al sincronizar — reintentando...');
+    setTimeout(syncToDrive, 5000);
+  }
+}
+
+async function syncFromDrive() {
+  if (!driveToken) return;
+  try {
+    setDriveSyncStatus('⏳ Cargando desde Drive...');
+    const fileId = await findOrCreateDriveFile();
+    const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+      headers: { Authorization: 'Bearer ' + driveToken }
+    });
+    const remote = await resp.json();
+    if (remote.transactions && remote.categories) {
+      // use whichever has more transactions (most recent)
+      if (remote.transactions.length >= state.transactions.length) {
+        state = remote;
+        if (!state.currentMonth && state.currentMonth !== 0) state.currentMonth = new Date().getMonth();
+        if (!state.currentYear) state.currentYear = new Date().getFullYear();
+        save();
+        renderDashboard();
+      }
+    }
+    const now = new Date().toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+    setDriveSyncStatus(`✅ Sincronizado a las ${now}`);
+  } catch {
+    setDriveSyncStatus('⚠️ No se pudo cargar desde Drive');
+  }
+}
+
+function syncNow() { syncFromDrive(); }
+
+function setDriveSyncStatus(msg) {
+  const el = document.getElementById('drive-sync-status');
+  if (el) el.textContent = msg;
+}
+
+function scheduleSyncToDrive() {
+  clearTimeout(syncDebounceTimer);
+  syncDebounceTimer = setTimeout(syncToDrive, 2000);
+}
+
+// ============================================================
 // AJUSTES
 // ============================================================
 function renderAjustes() {
@@ -1079,6 +1280,18 @@ function renderAjustes() {
   if (urlEl) urlEl.textContent = window.location.href;
   const info = localStorage.getItem('finanzas_last_export');
   if (info) document.getElementById('last-export-info').textContent = 'Último export: ' + info;
+  const helpOrigin = document.getElementById('help-origin');
+  if (helpOrigin) helpOrigin.textContent = window.location.origin;
+
+  const isConnected = !!(driveClientId && driveUserEmail);
+  document.getElementById('drive-setup-card').style.display = isConnected ? 'none' : 'block';
+  document.getElementById('drive-connected-card').style.display = isConnected ? 'block' : 'none';
+  if (isConnected) {
+    document.getElementById('drive-account-label').textContent = driveUserEmail;
+  } else {
+    const input = document.getElementById('drive-client-id');
+    if (input && driveClientId) input.value = driveClientId;
+  }
 }
 
 function exportData() {
@@ -1138,6 +1351,7 @@ function confirmReset() {
 // ============================================================
 load();
 renderDashboard();
+initDrive();
 </script>
 </body>
 </html>
